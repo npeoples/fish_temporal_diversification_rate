@@ -1,0 +1,128 @@
+NUM_TOTAL_SPECIES     = 4008
+NUM_SPECIES           = 1288
+NUM_STATES            = 2
+NUM_HIDDEN            = 2
+NUM_RATES             = NUM_STATES * NUM_HIDDEN
+H                     = 0.587405
+
+observed_phylogeny <- readTrees("reef_biting_tree.nexus")[1]
+data <- readCharacterData("biting_data.nex")
+taxa <- observed_phylogeny.taxa()
+tree_length <- observed_phylogeny.treeLength()
+root_age <- observed_phylogeny.rootAge()
+data_exp <- data.expandCharacters( NUM_HIDDEN )
+
+mvi = 0
+mni = 0
+
+rate_mean <- ln( ln(NUM_SPECIES/2.0) / root_age )
+rate_sd ~ dnExponential( 1.0 / H )
+moves[++mvi] = mvScale(rate_sd, lambda=1.0, tune=true, weight=2.0)
+
+for (i in 1:NUM_STATES) {
+
+speciation_alpha[i] ~ dnNormal(mean=rate_mean,sd=rate_sd)
+moves[++mvi] = mvScale(speciation_alpha[i],lambda=0.1,tune=true,weight=2.0)
+moves[++mvi] = mvScale(speciation_alpha[i],lambda=1.0,tune=true,weight=2.0)
+moves[++mvi] = mvSlide(speciation_alpha[i],delta=2.0,tune=true,weight=2.0)
+
+
+extinction_alpha[i] ~ dnNormal(mean=rate_mean,sd=rate_sd)
+moves[++mvi] = mvScale(extinction_alpha[i],lambda=0.1,tune=true,weight=2.0)
+moves[++mvi] = mvScale(extinction_alpha[i],lambda=1.0,tune=true,weight=2.0)
+moves[++mvi] = mvSlide(extinction_alpha[i],delta=2.0,tune=true,weight=2.0)
+
+}
+
+for (i in 1:NUM_HIDDEN) {
+
+speciation_beta[i] ~ dnExp(1.0)
+
+moves[++mvi] = mvScale(speciation_beta[i],lambda=0.1,tune=true,weight=2.0)
+moves[++mvi] = mvScale(speciation_beta[i],lambda=1.0,tune=true,weight=2.0)
+moves[++mvi] = mvSlide(speciation_beta[i],delta=2.0,tune=true,weight=2.0)
+
+extinction_beta[i] ~ dnNormal(0.0,1.0)
+moves[++mvi] = mvSlide(extinction_beta[i],delta=2.0,tune=true,weight=2.0)
+moves[++mvi] = mvScale(extinction_beta[i],lambda=0.1,tune=true,weight=2.0)
+moves[++mvi] = mvScale(extinction_beta[i],lambda=1.0,tune=true,weight=2.0)
+
+}
+
+for (j in 1:NUM_HIDDEN) {
+for (i in 1:NUM_STATES) {
+if ( j == 1) {
+speciation[i] := exp( speciation_alpha[i] )
+extinction[i] := exp( extinction_alpha[i] )
+} else {
+index = i+(j*NUM_STATES)-NUM_STATES
+speciation[index] := speciation[index-NUM_STATES] * exp( speciation_beta[j-1] )
+extinction[index] := exp( extinction_alpha[i] + extinction_beta[j-1] )
+}
+}
+}
+
+rate_pr := observed_phylogeny.treeLength() / 50
+for ( i in 1:(NUM_STATES*(NUM_STATES-1)) ) {
+    transition_rates[i] ~ dnExp(rate_pr)
+    moves[++mvi] = mvScale(transition_rates[i],lambda=1.0,tune=true,weight=2.0)
+    moves[++mvi] = mvScale(transition_rates[i],lambda=0.1,tune=true,weight=2.0)
+}
+
+hidden_rate ~ dnExponential(rate_pr)
+moves[++mvi] = mvScale(hidden_rate,lambda=0.5,tune=true,weight=5) 
+
+for (i in 1:(NUM_HIDDEN * (NUM_HIDDEN - 1))) {
+    R[i] ~ dnExp( rate_pr )
+    moves[++mvi] = mvScale(R[i],lambda=1.0,tune=true,weight=2.0)
+    moves[++mvi] = mvScale(R[i],lambda=0.1,tune=true,weight=2.0)
+}
+
+rate_matrix := fnHiddenStateRateMatrix(transition_rates, R, rescaled=false)
+
+root_prior ~ dnDirichlet( rep(1,NUM_RATES) )
+moves[++mvi] = mvDirichletSimplex(root_prior,tune=true,weight=2.0)
+moves[++mvi] = mvBetaSimplex(root_prior,tune=true,weight=2.0)
+
+rho <- observed_phylogeny.ntips()/NUM_TOTAL_SPECIES
+
+timetree ~ dnCDBDP( rootAge = root_age,
+speciationRates   = speciation,
+extinctionRates   = extinction,
+nTimeSlices       = 500,
+Q                 = rate_matrix,
+pi                = root_prior,
+delta             = 1.0,
+rho               = rho)
+
+
+timetree.clamp( observed_phylogeny )
+timetree.clampCharData( data_exp )
+
+mymodel = model(rate_matrix)
+
+monitors[++mni] = mnModel(filename="biting_hisse/hisse_2.log", printgen=1)
+monitors[++mni] = mnJointConditionalAncestralState(tree=timetree, cdbdp=timetree, type="NaturalNumbers", printgen=100, withTips=true, withStartStates=false, filename="biting_hisse/hisse_2_anc_states.log")
+monitors[++mni] = mnStochasticCharacterMap(cdbdp=timetree, printgen=100, filename="biting_hisse/hisse_2_stoch_map.log", include_simmap=true)
+monitors[++mni] = mnScreen(printgen=1, speciation, extinction)
+
+mymcmc = mcmc(mymodel, monitors, moves, nruns=2, moveschedule="random", combine="mixed")
+#mymcmc.burnin(generations=5000,tuningInterval=100)
+mymcmc.run(generations=50000, tuningInterval=100)
+
+anc_states = readAncestralStateTrace("biting_hisse/hisse_2_anc_states.log"")
+anc_tree = ancestralStateTree(tree=phylogeny, ancestral_state_trace_vector=anc_states, include_start_states=false, file="biting_hisse/hisse_2_tree.tree", burnin=0.25, summary_statistic="MAP", site=1, nStates=2*2)
+
+anc_state_trace = readAncestralStateTrace("hisse_2_stoch_map.log")
+characterMapTree(observed_phylogeny,
+                 anc_state_trace,
+                 character_file="output/hisse_2_stoch_map_character.tree",
+                 posterior_file="output/hisse_2_stoch_map_posterior.tree",
+                 burnin=0.1,
+                 reconstruction="marginal")
+
+
+
+
+
+
