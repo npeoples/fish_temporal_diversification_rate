@@ -1,0 +1,47 @@
+observed_phylogeny <- readTrees("trees/marine_benthopelagic_tree.nexus")[1]
+taxa <- observed_phylogeny.taxa()
+root <- observed_phylogeny.rootAge()
+tree_length <- observed_phylogeny.treeLength()
+moves    = VectorMoves()
+monitors = VectorMonitors()
+NUM_RATE_CATEGORIES = 6
+NUM_TOTAL_SPECIES = 1083
+H = 0.587405
+
+speciation_mean ~ dnLoguniform( 1E-6, 1E2)
+moves.append( mvScale(speciation_mean, lambda=1, tune=true, weight=2.0) )
+speciation_sd ~ dnExponential( 1.0 / H )
+moves.append( mvScale(speciation_sd, lambda=1, tune=true, weight=2.0) )
+speciation := fnDiscretizeDistribution( dnLognormal(ln(speciation_mean), speciation_sd), NUM_RATE_CATEGORIES )
+extinction_mean ~ dnLoguniform( 1E-6, 1E2)
+extinction_mean.setValue( speciation_mean / 2.0 )
+moves.append( mvScale(extinction_mean, lambda=1, tune=true, weight=2.0) )
+extinction := rep( extinction_mean, NUM_RATE_CATEGORIES )
+
+event_rate ~ dnUniform(0.0, 100.0/tree_length)
+moves.append( mvScale(event_rate, lambda=1, tune=true, weight=2.0) )
+rate_cat_probs <- simplex( rep(1, NUM_RATE_CATEGORIES) )
+rho <- observed_phylogeny.ntips() / NUM_TOTAL_SPECIES
+
+timetree ~ dnCDBDP( rootAge           = root,
+                    speciationRates   = speciation,
+                    extinctionRates   = extinction,
+                    Q                 = fnJC(NUM_RATE_CATEGORIES),
+                    delta             = event_rate,
+                    pi                = rate_cat_probs,
+                    rho               = rho,
+                    condition         = "time" )
+timetree.clamp(observed_phylogeny)
+mymodel = model(speciation)
+monitors.append( mnModel(filename="branch_specific_output/marine_benthopelagic_BDS.log",printgen=10, separator = TAB) )
+monitors.append( mnStochasticBranchRate(cdbdp=timetree, printgen=10, filename="branch_specific_output/marine_benthopelagic_BDS_rates.log") )
+monitors.append( mnScreen(printgen=1, event_rate, speciation_mean, extinction_mean) )
+
+mymcmc = mcmc(mymodel, monitors, moves, nruns=2, combine="mixed")
+mymcmc.run(generations=500000,tuning=200)
+
+
+
+
+
+
